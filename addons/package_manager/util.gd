@@ -2,6 +2,8 @@
 class_name PackageManagerUtil
 extends RefCounted
 
+const _DEBUG_INSTALL := true  # Set to false to disable install/expand debug logs
+
 const SETTINGS_PATH := "user://package_manager/settings.cfg"
 const DEFAULT_STORE_PATH := "user://package_manager/packs"
 
@@ -76,6 +78,120 @@ static func globalize(p: String) -> String:
 	if p.begins_with("res://"):
 		return ProjectSettings.globalize_path(p)
 	return p
+
+
+## Zip a folder recursively to a .zip file (absolute paths). Returns OK on success.
+static func _zip_folder(src_dir_abs: String, zip_path_abs: String) -> Error:
+	if not DirAccess.dir_exists_absolute(src_dir_abs):
+		return ERR_FILE_NOT_FOUND
+	var parent := zip_path_abs.get_base_dir()
+	if not parent.is_empty() and _ensure_dir_absolute(parent) != OK:
+		return FAILED
+	var zipper := ZIPPacker.new()
+	if zipper.open(zip_path_abs, ZIPPacker.APPEND_CREATE) != OK:
+		return FAILED
+	var err := _zip_folder_recursive(zipper, src_dir_abs, "")
+	zipper.close()
+	return err
+
+
+static func _zip_folder_recursive(zipper: ZIPPacker, abs_dir: String, rel_prefix: String) -> Error:
+	var dir := DirAccess.open(abs_dir)
+	if dir == null:
+		return FAILED
+	dir.list_dir_begin()
+	var n := dir.get_next()
+	while n != "":
+		if n == "." or n == "..":
+			n = dir.get_next()
+			continue
+		if n == ".zip":
+			n = dir.get_next()
+			continue
+		var rel_path := rel_prefix + n if rel_prefix.is_empty() else rel_prefix + "/" + n
+		var full := abs_dir.path_join(n)
+		if dir.current_is_dir():
+			var e := _zip_folder_recursive(zipper, full, rel_path)
+			if e != OK:
+				dir.list_dir_end()
+				return e
+		else:
+			zipper.start_file(rel_path)
+			var data := FileAccess.get_file_as_bytes(full)
+			if data == null:
+				dir.list_dir_end()
+				return FAILED
+			zipper.write_file(data)
+			zipper.close_file()
+		n = dir.get_next()
+	dir.list_dir_end()
+	return OK
+
+
+## Unzip a .zip file to a directory (absolute paths). Creates dest_dir if needed.
+static func _unzip_to(zip_path_abs: String, dest_dir_abs: String) -> Error:
+	if not FileAccess.file_exists(zip_path_abs):
+		return ERR_FILE_NOT_FOUND
+	dest_dir_abs = dest_dir_abs.replace("\\", "/").strip_edges().trim_suffix("/")
+	if _ensure_dir_absolute(dest_dir_abs) != OK:
+		return FAILED
+	var reader := ZIPReader.new()
+	if reader.open(zip_path_abs) != OK:
+		return FAILED
+	var files := reader.get_files()
+	for raw_path in files:
+		var file_path := str(raw_path).replace("\\", "/").strip_edges().lstrip("/")
+		if file_path.is_empty():
+			continue
+		if file_path == ".zip" or file_path.get_file() == ".zip":
+			continue
+		if file_path.ends_with("/"):
+			var dir_path := dest_dir_abs + "/" + file_path.trim_suffix("/")
+			_ensure_dir_absolute(dir_path)
+			continue
+		# Build output path with forward slashes so FileAccess works on all platforms
+		var out_path := (dest_dir_abs + "/" + file_path).replace("//", "/")
+		var out_dir := out_path.get_base_dir().replace("\\", "/")
+		if not out_dir.is_empty() and _ensure_dir_absolute(out_dir) != OK:
+			reader.close()
+			return FAILED
+		var data := reader.read_file(raw_path)
+		if data == null:
+			data = PackedByteArray()
+		var f := FileAccess.open(out_path, FileAccess.WRITE)
+		if f == null:
+			reader.close()
+			return FAILED
+		f.store_buffer(data)
+		f.close()
+	reader.close()
+	return OK
+
+
+## Extract a single file from a zip to a destination path. Creates parent dir of dest_file_abs if needed.
+static func _extract_single_from_zip(zip_path_abs: String, entry_name: String, dest_file_abs: String) -> Error:
+	if not FileAccess.file_exists(zip_path_abs):
+		return ERR_FILE_NOT_FOUND
+	var reader := ZIPReader.new()
+	if reader.open(zip_path_abs) != OK:
+		return FAILED
+	if not reader.file_exists(entry_name):
+		reader.close()
+		return ERR_FILE_NOT_FOUND
+	var data := reader.read_file(entry_name)
+	reader.close()
+	if data == null:
+		data = PackedByteArray()
+	dest_file_abs = dest_file_abs.replace("\\", "/").strip_edges()
+	var out_dir := dest_file_abs.get_base_dir()
+	if not out_dir.is_empty() and _ensure_dir_absolute(out_dir) != OK:
+		return FAILED
+	var f := FileAccess.open(dest_file_abs, FileAccess.WRITE)
+	if f == null:
+		return FAILED
+	f.store_buffer(data)
+	f.close()
+	return OK
 
 
 ## Copy a file or directory recursively from src to dst (absolute paths).
@@ -232,7 +348,11 @@ static func _list_content_paths_recursive(abs_dir: String, rel_prefix: String, o
 		if dir.current_is_dir():
 			_list_content_paths_recursive(full, rel, out)
 		else:
-			out.append(rel)
+			# Folders are stored as .zip; expose as path without .zip so install/UI see one folder entry
+			if n.ends_with(".zip"):
+				out.append(rel.substr(0, rel.length() - 4))
+			else:
+				out.append(rel)
 		n = dir.get_next()
 	dir.list_dir_end()
 
@@ -248,10 +368,12 @@ static func install_package(store_root_globalized: String, package_id: String, p
 
 ## Install selected paths into project. install_subpath is relative to project root (e.g. "addons/MyAddon"). paths_to_install: which manifest paths to copy. ignore_asset_root: strip first path segment from each path when installing.
 static func install_package_selective(store_root_globalized: String, package_id: String, project_res_globalized: String, install_subpath: String, paths_to_install: PackedStringArray, ignore_asset_root: bool, overwrite: bool) -> Dictionary:
-	var content_dir := store_root_globalized.path_join(package_id).path_join("content")
-	var base := project_res_globalized
+	var content_dir := store_root_globalized.path_join(package_id).path_join("content").replace("\\", "/")
+	var base := project_res_globalized.replace("\\", "/").strip_edges().trim_suffix("/")
 	if not install_subpath.is_empty():
-		base = base.path_join(install_subpath.replace("\\", "/").strip_edges().trim_suffix("/"))
+		base = (base + "/" + install_subpath.replace("\\", "/").strip_edges().trim_suffix("/")).replace("//", "/")
+	if _DEBUG_INSTALL:
+		print("[PackageManagerUtil] install_package_selective content_dir=%s base=%s paths_count=%d" % [content_dir, base, paths_to_install.size()])
 	for rel_path in paths_to_install:
 		rel_path = rel_path.replace("\\", "/").strip_edges()
 		if rel_path.is_empty():
@@ -263,17 +385,179 @@ static func install_package_selective(store_root_globalized: String, package_id:
 				install_path = rel_path.substr(idx + 1)
 			else:
 				install_path = rel_path.get_file()
-		var src := content_dir.path_join(rel_path)
-		var dst := base.path_join(install_path)
-		if not FileAccess.file_exists(src) and not DirAccess.dir_exists_absolute(src):
-			continue
-		if FileAccess.file_exists(dst) or DirAccess.dir_exists_absolute(dst):
-			if not overwrite:
-				return {"ok": false, "error": "File or folder already exists (enable overwrite): %s" % install_path}
-		var e := copy_recursive(src, dst)
-		if e != OK:
-			return {"ok": false, "error": "Failed to copy %s (code %s)" % [install_path, e]}
+		var dst := (base + "/" + install_path).replace("//", "/")
+		var zip_src := (content_dir + "/" + rel_path + ".zip").replace("//", "/")
+		var dir_or_file_src := (content_dir + "/" + rel_path).replace("//", "/")
+		var zip_ok := FileAccess.file_exists(zip_src)
+		var dir_ok := DirAccess.dir_exists_absolute(dir_or_file_src)
+		var file_ok := FileAccess.file_exists(dir_or_file_src)
+		if _DEBUG_INSTALL:
+			print("  rel_path=%s -> dst=%s zip_ok=%s dir_ok=%s file_ok=%s" % [rel_path, dst, zip_ok, dir_ok, file_ok])
+		if zip_ok:
+			# Whole folder zip: extract all
+			if FileAccess.file_exists(dst) or DirAccess.dir_exists_absolute(dst):
+				if not overwrite:
+					return {"ok": false, "error": "Folder already exists (enable overwrite): %s" % install_path}
+			if _ensure_dir_absolute(dst) != OK:
+				return {"ok": false, "error": "Failed to create destination: %s" % install_path}
+			var e := _unzip_to(zip_src, dst)
+			if _DEBUG_INSTALL:
+				print("    _unzip_to(%s, %s) -> %s" % [zip_src, dst, e])
+			if e != OK:
+				return {"ok": false, "error": "Failed to extract %s (code %s)" % [install_path, e]}
+		elif file_ok and rel_path.ends_with("/.zip"):
+			# Store has a dir with a file named .zip (e.g. content/Test/.zip) — extract zip into destination folder
+			var dst_dir := (base + "/" + install_path.get_base_dir()).replace("//", "/")
+			if FileAccess.file_exists(dst_dir) or DirAccess.dir_exists_absolute(dst_dir):
+				if not overwrite:
+					return {"ok": false, "error": "Folder already exists (enable overwrite): %s" % install_path.get_base_dir()}
+			if _ensure_dir_absolute(dst_dir) != OK:
+				return {"ok": false, "error": "Failed to create destination: %s" % install_path.get_base_dir()}
+			var e := _unzip_to(dir_or_file_src, dst_dir)
+			if _DEBUG_INSTALL:
+				print("    _unzip_to(.zip file) (%s, %s) -> %s" % [dir_or_file_src, dst_dir, e])
+			if e != OK:
+				return {"ok": false, "error": "Failed to extract %s (code %s)" % [install_path, e]}
+		elif dir_ok or file_ok:
+			# Direct file or dir in content
+			if FileAccess.file_exists(dst) or DirAccess.dir_exists_absolute(dst):
+				if not overwrite:
+					return {"ok": false, "error": "File or folder already exists (enable overwrite): %s" % install_path}
+			var e := copy_recursive(dir_or_file_src, dst)
+			if _DEBUG_INSTALL:
+				print("    copy_recursive -> %s" % e)
+			if e != OK:
+				return {"ok": false, "error": "Failed to copy %s (code %s)" % [install_path, e]}
+		else:
+			# Path may be a file inside a zip: either parent.zip (e.g. content/Test.zip) or parent/.zip (e.g. content/Test/.zip)
+			var parent := rel_path.get_base_dir()
+			var found_zip := false
+			while not parent.is_empty():
+				var parent_zip := (content_dir + "/" + parent + ".zip").replace("//", "/")
+				var parent_dot_zip := (content_dir + "/" + parent + "/.zip").replace("//", "/")
+				var zip_path_to_use := ""
+				if FileAccess.file_exists(parent_zip):
+					zip_path_to_use = parent_zip
+				elif FileAccess.file_exists(parent_dot_zip):
+					zip_path_to_use = parent_dot_zip
+				if not zip_path_to_use.is_empty():
+					var entry_name := rel_path.substr(parent.length() + 1)
+					if FileAccess.file_exists(dst) or DirAccess.dir_exists_absolute(dst):
+						if not overwrite:
+							return {"ok": false, "error": "File already exists (enable overwrite): %s" % install_path}
+					var e := _extract_single_from_zip(zip_path_to_use, entry_name, dst)
+					if _DEBUG_INSTALL:
+						print("    extract from zip %s entry=%s -> %s" % [zip_path_to_use, entry_name, e])
+					if e != OK:
+						return {"ok": false, "error": "Failed to extract %s (code %s)" % [install_path, e]}
+					found_zip = true
+					break
+				parent = parent.get_base_dir()
+			if _DEBUG_INSTALL and not found_zip:
+				print("    no zip found for path, skipping")
+			if not found_zip:
+				continue
+	if _DEBUG_INSTALL:
+		print("  install_package_selective done ok=true")
 	return {"ok": true}
+
+
+## Returns the full list of relative paths that will be installed for the given paths (expands zips/dirs into file list). Used for installation preview.
+static func get_expanded_install_paths(store_root_globalized: String, package_id: String, paths: PackedStringArray) -> PackedStringArray:
+	var content_dir := (store_root_globalized.path_join(package_id).path_join("content")).replace("\\", "/")
+	var out: PackedStringArray = []
+	if _DEBUG_INSTALL:
+		print("[PackageManagerUtil] get_expanded_install_paths content_dir=%s paths_count=%d" % [content_dir, paths.size()])
+	for rel_path in paths:
+		rel_path = rel_path.replace("\\", "/").strip_edges().trim_suffix("/")
+		if rel_path.is_empty():
+			continue
+		var zip_path := (content_dir + "/" + rel_path + ".zip").replace("//", "/")
+		var dir_or_file := (content_dir + "/" + rel_path).replace("//", "/")
+		var zip_exists := FileAccess.file_exists(zip_path)
+		var dir_exists := DirAccess.dir_exists_absolute(dir_or_file)
+		var file_exists := FileAccess.file_exists(dir_or_file)
+		if _DEBUG_INSTALL:
+			print("  rel_path=%s zip=%s zip_exists=%s dir_exists=%s file_exists=%s" % [rel_path, zip_path, zip_exists, dir_exists, file_exists])
+		if zip_exists:
+			var reader := ZIPReader.new()
+			if reader.open(zip_path) == OK:
+				var files := reader.get_files()
+				if _DEBUG_INSTALL:
+					print("    zip opened, %d entries" % files.size())
+				for raw_fp in files:
+					var file_path := str(raw_fp).replace("\\", "/").strip_edges().lstrip("/")
+					if file_path.is_empty() or file_path.ends_with("/"):
+						continue
+					if file_path == ".zip" or file_path.get_file() == ".zip":
+						continue
+					var full := (rel_path + "/" + file_path).replace("//", "/")
+					out.append(full)
+				reader.close()
+			elif _DEBUG_INSTALL:
+				print("    zip open FAILED")
+		elif dir_exists:
+			_expand_dir_paths(dir_or_file, rel_path, out)
+			if _DEBUG_INSTALL:
+				print("    expanded dir, out now has %d paths" % out.size())
+		elif file_exists:
+			out.append(rel_path)
+			if _DEBUG_INSTALL:
+				print("    single file appended")
+	if _DEBUG_INSTALL:
+		print("  get_expanded_install_paths result count=%d" % out.size())
+	return out
+
+
+static func _expand_dir_paths(abs_dir: String, rel_prefix: String, out: PackedStringArray) -> void:
+	abs_dir = abs_dir.replace("\\", "/").strip_edges().trim_suffix("/")
+	var dir := DirAccess.open(abs_dir)
+	if _DEBUG_INSTALL:
+		print("    _expand_dir_paths abs_dir=%s rel_prefix=%s dir_valid=%s" % [abs_dir, rel_prefix, dir != null])
+	if dir == null:
+		return
+	var err := dir.list_dir_begin()
+	if _DEBUG_INSTALL:
+		print("      list_dir_begin err=%s" % err)
+	var n := dir.get_next()
+	var entry_count := 0
+	while n != "":
+		entry_count += 1
+		var is_dir := dir.current_is_dir()
+		if _DEBUG_INSTALL and entry_count <= 15:
+			print("      entry: name=%s is_dir=%s" % [n, is_dir])
+		if n == "." or n == "..":
+			n = dir.get_next()
+			continue
+		var rel := (rel_prefix + "/" + n).replace("//", "/") if not rel_prefix.is_empty() else n
+		var full := abs_dir.path_join(n).replace("\\", "/")
+		if is_dir:
+			_expand_dir_paths(full, rel, out)
+		elif n == ".zip":
+			# Directory contains a single file named .zip — treat as archive and expand its contents for preview/install
+			_expand_zip_entries_into_paths(full, rel_prefix, out)
+		else:
+			out.append(rel)
+		n = dir.get_next()
+	dir.list_dir_end()
+	if _DEBUG_INSTALL:
+		print("      _expand_dir_paths total entries=%d out.size() now=%d" % [entry_count, out.size()])
+
+
+## When a store directory contains a file named .zip, expand that zip's entries into out with rel_prefix (e.g. "Test" -> "Test/icon.svg").
+static func _expand_zip_entries_into_paths(zip_path_abs: String, rel_prefix: String, out: PackedStringArray) -> void:
+	var reader := ZIPReader.new()
+	if reader.open(zip_path_abs) != OK:
+		return
+	for raw_fp in reader.get_files():
+		var file_path := str(raw_fp).replace("\\", "/").strip_edges().lstrip("/")
+		if file_path.is_empty() or file_path.ends_with("/"):
+			continue
+		if file_path == ".zip" or file_path.get_file() == ".zip":
+			continue
+		var full := (rel_prefix + "/" + file_path).replace("//", "/") if not rel_prefix.is_empty() else file_path
+		out.append(full)
+	reader.close()
 
 
 ## Count how many paths would conflict (already exist) in project. Returns { "count": N, "paths": [...] }.
@@ -427,6 +711,9 @@ static func duplicate_package(store_root_globalized: String, source_id: String, 
 
 ## Ensure a directory and all parents exist (absolute path). Returns OK on success.
 static func _ensure_dir_absolute(path: String) -> Error:
+	path = path.replace("\\", "/").strip_edges().trim_suffix("/")
+	if path.is_empty():
+		return OK
 	if DirAccess.dir_exists_absolute(path):
 		return OK
 	var parent := path.get_base_dir()
@@ -437,7 +724,14 @@ static func _ensure_dir_absolute(path: String) -> Error:
 	var d := DirAccess.open(parent)
 	if d == null:
 		return FAILED
-	return OK if d.make_dir(path.get_file()) == OK else FAILED
+	var name := path.get_file()
+	var err := d.make_dir(name)
+	if err == OK:
+		return OK
+	# Directory may already exist (path normalization, race, or make_dir returned ERR_ALREADY_EXISTS)
+	if DirAccess.dir_exists_absolute(path):
+		return OK
+	return err
 
 
 ## Create package directory layout and write manifest. paths are relative to project res://.
@@ -460,12 +754,22 @@ static func create_package(store_path: String, package_id: String, display_name:
 		return FAILED
 	var project_root := ProjectSettings.globalize_path("res://")
 	for rel_path in paths:
-		rel_path = rel_path.replace("\\", "/")
+		rel_path = rel_path.replace("\\", "/").strip_edges()
+		if rel_path.is_empty():
+			continue
 		var src := project_root.path_join(rel_path)
-		var dst := content_dir.path_join(rel_path)
-		var e := copy_recursive(src, dst)
-		if e != OK:
-			return e
+		if DirAccess.dir_exists_absolute(src):
+			var zip_dst := content_dir.path_join(rel_path + ".zip")
+			if _ensure_dir_absolute(zip_dst.get_base_dir()) != OK:
+				return FAILED
+			var e := _zip_folder(src, zip_dst)
+			if e != OK:
+				return e
+		else:
+			var dst := content_dir.path_join(rel_path)
+			var e := copy_recursive(src, dst)
+			if e != OK:
+				return e
 	var manifest_path := pkg_dir.path_join("manifest.cfg")
 	var cfg := ConfigFile.new()
 	cfg.set_value("package", "id", package_id)

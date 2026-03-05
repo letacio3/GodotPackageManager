@@ -31,6 +31,8 @@ func _ready() -> void:
 	_contents_tree.item_edited.connect(_on_contents_item_edited)
 
 
+const _DEBUG := true  # Set to false to disable debug logs
+
 func setup(package: Dictionary, store_root: String, package_id: String, overwrite: bool) -> void:
 	_package = package
 	_store_root = store_root
@@ -43,6 +45,12 @@ func setup(package: Dictionary, store_root: String, package_id: String, overwrit
 	_asset_label.text = "Asset: %s" % package.get("name", package_id)
 	var manifest := PackageManagerUtil.load_manifest(store_root, package_id)
 	_manifest_paths = PackedStringArray(manifest.get("paths", []))
+	if _DEBUG:
+		print("[InstallConfig] setup package_id=%s store_root=%s manifest_paths_count=%d" % [package_id, store_root, _manifest_paths.size()])
+		for i in range(mini(_manifest_paths.size(), 10)):
+			print("  manifest_path[%d]=%s" % [i, _manifest_paths[i]])
+		if _manifest_paths.size() > 10:
+			print("  ... and %d more" % (_manifest_paths.size() - 10))
 	_ignore_root_check.button_pressed = false
 	_install_folder_label.text = ("res://" + _install_subpath + "/").replace("//", "/") if not _install_subpath.is_empty() else "res://"
 	_populate_contents_tree()
@@ -55,14 +63,32 @@ func _populate_contents_tree() -> void:
 	_contents_tree.hide_root = true
 	_contents_tree.column_titles_visible = false
 	_contents_tree.set_column_title(0, "Contents")
+	var store_root_global := PackageManagerUtil.globalize(_store_root)
+	var expanded := PackageManagerUtil.get_expanded_install_paths(store_root_global, _package_id, _manifest_paths)
+	if expanded.is_empty():
+		if _DEBUG:
+			print("[InstallConfig] get_expanded_install_paths returned empty, using _manifest_paths (count=%d)" % _manifest_paths.size())
+		expanded = _manifest_paths
+	else:
+		if _DEBUG:
+			print("[InstallConfig] get_expanded_install_paths returned %d paths (first 5): " % expanded.size())
+			for i in range(mini(expanded.size(), 5)):
+				print("  expanded[%d]=%s" % [i, expanded[i]])
 	var root := _contents_tree.create_item()
 	var path_to_item: Dictionary = {}
 	path_to_item[""] = root
-	for path in _manifest_paths:
-		var p := str(path).replace("\\", "/").strip_edges()
+	for path in expanded:
+		var p := str(path).replace("\\", "/").strip_edges().trim_suffix("/")
 		if p.is_empty():
 			continue
-		var segments := p.split("/")
+		var segments := PackedStringArray()
+		for s in p.split("/"):
+			var part := str(s).strip_edges()
+			if part.is_empty():
+				continue
+			segments.append(part)
+		if segments.is_empty():
+			continue
 		var prefix := ""
 		for i in range(segments.size()):
 			var seg := segments[i]
@@ -75,11 +101,28 @@ func _populate_contents_tree() -> void:
 				item.set_cell_mode(0, TreeItem.CELL_MODE_CHECK)
 				item.set_editable(0, true)
 				item.set_checked(0, true)
-				if i == segments.size() - 1:
-					item.set_metadata(0, p)
 				path_to_item[key] = item
 			prefix = key
+		if path_to_item.has(prefix):
+			path_to_item[prefix].set_metadata(0, p)
+	if _DEBUG:
+		var with_meta := _count_items_with_metadata(_contents_tree.get_root())
+		print("[InstallConfig] contents tree: expanded paths=%d, tree items with metadata=%d" % [expanded.size(), with_meta])
 	_update_parent_checks(_contents_tree.get_root())
+
+
+func _count_items_with_metadata(item: TreeItem) -> int:
+	if item == null:
+		return 0
+	var n := 0
+	var meta := item.get_metadata(0)
+	if meta != null and str(meta).length() > 0:
+		n = 1
+	var child := item.get_first_child()
+	while child:
+		n += _count_items_with_metadata(child)
+		child = child.get_next()
+	return n
 
 
 func _update_parent_checks(item: TreeItem) -> void:
@@ -158,16 +201,37 @@ func _update_preview() -> void:
 		base = base.trim_suffix("/")
 		_install_folder_label.text = base + "/"
 	var selected := _get_selected_paths()
+	if _DEBUG:
+		print("[InstallConfig] _update_preview: selected paths count=%d" % selected.size())
+		for i in range(mini(selected.size(), 8)):
+			print("  selected[%d]=%s" % [i, selected[i]])
+		if selected.size() > 8:
+			print("  ... and %d more" % (selected.size() - 8))
+	if selected.is_empty():
+		return
+	# Use selected paths directly for preview: they are already expanded (file-level) from the contents tree.
+	# Re-calling get_expanded_install_paths would return empty for paths inside zips (e.g. "folder/file.png").
 	var path_to_item: Dictionary = {}
 	path_to_item[""] = root
 	for path in selected:
-		var p := path.replace("\\", "/").strip_edges()
+		var p := str(path).replace("\\", "/").strip_edges().trim_suffix("/")
+		if p.is_empty():
+			continue
 		var install_path := p
 		if _ignore_asset_root:
 			var idx := p.find("/")
 			install_path = p.substr(idx + 1) if idx >= 0 else p.get_file()
-		var full := (base + "/" + install_path).replace("//", "/")
-		var segments := install_path.split("/")
+		install_path = install_path.replace("\\", "/").strip_edges().trim_suffix("/")
+		if install_path.is_empty():
+			continue
+		var segments := PackedStringArray()
+		for s in install_path.split("/"):
+			var seg := str(s).strip_edges()
+			if seg.is_empty():
+				continue
+			segments.append(seg)
+		if segments.is_empty():
+			continue
 		var prefix := ""
 		for i in range(segments.size()):
 			var seg := segments[i]
@@ -226,6 +290,12 @@ func _on_install_dir_selected(dir: String) -> void:
 
 func _on_install_pressed() -> void:
 	var paths := _get_selected_paths()
+	if _DEBUG:
+		print("[InstallConfig] Install pressed: install_subpath=%s paths_count=%d ignore_asset_root=%s" % [_install_subpath, paths.size(), _ignore_asset_root])
+		for i in range(mini(paths.size(), 15)):
+			print("  paths[%d]=%s" % [i, paths[i]])
+		if paths.size() > 15:
+			print("  ... and %d more" % (paths.size() - 15))
 	if paths.is_empty():
 		return
 	install_requested.emit(_install_subpath, paths, _ignore_asset_root)

@@ -23,6 +23,7 @@ const InstallConfigDialogScene = preload("res://addons/package_manager/install_c
 @onready var _preview_btn: Button = $MarginContainer/VBox/ActionsBar/PreviewBtn
 @onready var _duplicate_btn: Button = $MarginContainer/VBox/ActionsBar/DuplicateBtn
 @onready var _remove_btn: Button = $MarginContainer/VBox/ActionsBar/RemoveBtn
+@onready var _open_folder_btn: Button = $MarginContainer/VBox/ActionsBar/OpenFolderBtn
 
 var _packages: Array[Dictionary] = []
 var _selected_package_index: int = -1
@@ -49,6 +50,7 @@ func _ready() -> void:
 	_preview_btn.pressed.connect(_on_preview_pressed)
 	_duplicate_btn.pressed.connect(_on_duplicate_pressed)
 	_remove_btn.pressed.connect(_on_remove_pressed)
+	_open_folder_btn.pressed.connect(_on_open_folder_pressed)
 	_setup_pack_dialog()
 	_setup_confirm_dialogs()
 	_setup_settings_dialog()
@@ -124,9 +126,11 @@ func _on_install_config_confirmed(install_subpath: String, paths: PackedStringAr
 	if _selected_package_index < 0:
 		return
 	var pkg: Dictionary = _packages[_selected_package_index]
-	var store_root: String = pkg["store_root"]
+	var store_root: String = PackageManagerUtil.globalize(pkg["store_root"])
 	var package_id: String = pkg["id"]
 	var project_root := ProjectSettings.globalize_path("res://")
+	if true:  # debug
+		print("[ManagerPopup] install_config_confirmed store_root=%s package_id=%s install_subpath=%s paths_count=%d" % [store_root, package_id, install_subpath, paths.size()])
 	_install_btn.disabled = true
 	_update_status("Installing...")
 	var overwrite := _get_overwrite_setting()
@@ -198,6 +202,22 @@ func _on_confirmed_remove() -> void:
 		_update_status("Removed \"%s\"." % pkg.get("name", package_id))
 	else:
 		_update_status("Failed to remove package (code %s)." % err)
+
+
+func _on_open_folder_pressed() -> void:
+	if _selected_package_index < 0 or _selected_package_index >= _packages.size():
+		return
+	var pkg: Dictionary = _packages[_selected_package_index]
+	var store_root: String = pkg.get("store_root", "")
+	var package_id: String = pkg.get("id", "")
+	if store_root.is_empty() or package_id.is_empty():
+		return
+	var folder_path: String = store_root.path_join(package_id).replace("\\", "/")
+	if not DirAccess.dir_exists_absolute(folder_path):
+		_update_status("Package folder not found: %s" % folder_path)
+		return
+	OS.shell_open(folder_path)
+	_update_status("Opened folder for \"%s\"." % pkg.get("name", package_id))
 
 
 func _setup_confirm_dialogs() -> void:
@@ -301,6 +321,8 @@ func _set_tooltips() -> void:
 		_settings_btn.tooltip_text = "Configure store path and options"
 	if _install_btn:
 		_install_btn.tooltip_text = "Install the selected package into this project"
+	if _open_folder_btn:
+		_open_folder_btn.tooltip_text = "Open this package's folder in the file manager"
 	if _preview_btn:
 		_preview_btn.tooltip_text = "Preview package details and manage thumbnails/media"
 	if _duplicate_btn:
@@ -336,6 +358,7 @@ func _update_actions_state() -> void:
 	_preview_btn.disabled = !has_selection
 	_duplicate_btn.disabled = !has_selection
 	_remove_btn.disabled = !has_selection
+	_open_folder_btn.disabled = !has_selection
 
 
 func _open_preview_for_index(index: int) -> void:

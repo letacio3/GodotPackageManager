@@ -82,17 +82,34 @@ func _path_to_relative(path: String) -> String:
 
 
 func _on_dir_selected(dir: String) -> void:
-	# In OPEN_DIR mode, dir_selected can pass current_dir (parent); use current_path for the actually selected folder.
+	# In OPEN_DIR mode, dir_selected often passes current_dir (parent). Prefer current_path for the actually selected folder.
 	var path_to_use := dir
 	if _file_dialog and _file_dialog.file_mode == EditorFileDialog.FILE_MODE_OPEN_DIR:
-		var current_path := _file_dialog.current_path
+		var current_path := _file_dialog.current_path.strip_edges()
 		if not current_path.is_empty():
 			path_to_use = current_path
+		else:
+			# current_path can be empty on some platforms; avoid adding the parent by requiring a real selection
+			_show_error("Select a folder by clicking it, then press Open/Select.")
+			return
 	var rel := _path_to_relative(path_to_use)
-	if rel.is_empty():
+	if rel.is_empty() or rel == ".":
+		_show_error("Project root cannot be packed as a single folder.")
 		return
-	if _paths_list_index_of(rel) < 0:
-		_paths_list.add_item(rel)
+	# Avoid adding a path that is already covered by an existing path (e.g. parent folder)
+	if _paths_list_index_of(rel) >= 0:
+		return
+	var idx := 0
+	while idx < _paths_list.item_count:
+		var existing := _paths_list.get_item_text(idx)
+		if rel == existing or rel.begins_with(existing + "/"):
+			return  # already covered
+		if existing.begins_with(rel + "/"):
+			_paths_list.remove_item(idx)
+			continue
+		idx += 1
+	_paths_list.add_item(rel)
+	_show_error("")
 
 
 func _on_files_selected(paths: PackedStringArray) -> void:
