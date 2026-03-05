@@ -82,7 +82,13 @@ func _path_to_relative(path: String) -> String:
 
 
 func _on_dir_selected(dir: String) -> void:
-	var rel := _path_to_relative(dir)
+	# In OPEN_DIR mode, dir_selected can pass current_dir (parent); use current_path for the actually selected folder.
+	var path_to_use := dir
+	if _file_dialog and _file_dialog.file_mode == EditorFileDialog.FILE_MODE_OPEN_DIR:
+		var current_path := _file_dialog.current_path
+		if not current_path.is_empty():
+			path_to_use = current_path
+	var rel := _path_to_relative(path_to_use)
 	if rel.is_empty():
 		return
 	if _paths_list_index_of(rel) < 0:

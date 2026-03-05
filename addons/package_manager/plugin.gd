@@ -8,6 +8,9 @@ var _menu_button: MenuButton
 
 
 func _enter_tree() -> void:
+	var ep := get_editor_interface().get_editor_paths()
+	PackageManagerUtil.set_editor_paths(ep.get_config_dir(), ep.get_data_dir())
+
 	_manager_popup = ManagerPopup.instantiate()
 	_manager_popup.plugin = self
 	_manager_popup.visible = false

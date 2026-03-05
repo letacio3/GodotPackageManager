@@ -5,28 +5,68 @@ extends RefCounted
 const SETTINGS_PATH := "user://package_manager/settings.cfg"
 const DEFAULT_STORE_PATH := "user://package_manager/packs"
 
-## Returns the configured store path, or default.
+# When set by the plugin, settings and default store use editor-wide paths (shared across all projects).
+static var _editor_config_dir: String = ""
+static var _editor_data_dir: String = ""
+
+## Call from the plugin so packs and settings use the editor folder (shared across projects).
+static func set_editor_paths(config_dir: String, data_dir: String) -> void:
+	_editor_config_dir = config_dir.strip_edges().trim_suffix("/")
+	_editor_data_dir = data_dir.strip_edges().trim_suffix("/")
+
+static func _get_settings_path() -> String:
+	if not _editor_config_dir.is_empty():
+		return _editor_config_dir.path_join("package_manager").path_join("settings.cfg")
+	return ProjectSettings.globalize_path(SETTINGS_PATH)
+
+static func _get_default_store_path() -> String:
+	if not _editor_data_dir.is_empty():
+		return _editor_data_dir.path_join("package_manager").path_join("packs")
+	return ProjectSettings.globalize_path(DEFAULT_STORE_PATH)
+
+## Returns the default store path (editor or project user). Use for "reset to default".
+static func get_default_store_path() -> String:
+	return _get_default_store_path()
+
+## Returns the absolute path to the settings file (for loading/saving overwrite etc.).
+static func get_settings_file_path() -> String:
+	return _get_settings_path()
+
+## Returns the configured store path, or default (editor-wide when set_editor_paths was called).
 static func get_store_path() -> String:
+	var settings_path := _get_settings_path()
+	var default_store := _get_default_store_path()
 	var cfg := ConfigFile.new()
-	if FileAccess.file_exists(ProjectSettings.globalize_path(SETTINGS_PATH)):
-		var e := cfg.load(ProjectSettings.globalize_path(SETTINGS_PATH))
-		if e == OK:
-			return cfg.get_value("package_manager", "store_path", DEFAULT_STORE_PATH)
-	return DEFAULT_STORE_PATH
+	if FileAccess.file_exists(settings_path):
+		if cfg.load(settings_path) == OK:
+			var saved := cfg.get_value("package_manager", "store_path", "")
+			if not saved.is_empty():
+				return saved
+	return default_store
 
 
-## Persist store path to settings.
+## Persist store path to settings (editor-wide when set_editor_paths was called).
 static func set_store_path(path: String) -> Error:
-	var base := ProjectSettings.globalize_path("user://package_manager")
-	if not DirAccess.dir_exists_absolute(base):
-		var d := DirAccess.open(ProjectSettings.globalize_path("user://"))
-		if d == null:
-			return FAILED
-		if d.make_dir_recursive("package_manager") != OK:
-			return FAILED
+	var settings_path := _get_settings_path()
+	if not _editor_config_dir.is_empty():
+		var base := _editor_config_dir.path_join("package_manager")
+		if not DirAccess.dir_exists_absolute(base):
+			var d := DirAccess.open(_editor_config_dir)
+			if d == null:
+				return FAILED
+			if d.make_dir("package_manager") != OK:
+				return FAILED
+	else:
+		var base := ProjectSettings.globalize_path("user://package_manager")
+		if not DirAccess.dir_exists_absolute(base):
+			var d := DirAccess.open(ProjectSettings.globalize_path("user://"))
+			if d == null:
+				return FAILED
+			if d.make_dir_recursive("package_manager") != OK:
+				return FAILED
 	var cfg := ConfigFile.new()
 	cfg.set_value("package_manager", "store_path", path)
-	return cfg.save(ProjectSettings.globalize_path(SETTINGS_PATH))
+	return cfg.save(settings_path)
 
 
 ## Globalize path (user:// or res://) to absolute.

@@ -18,7 +18,7 @@ func _ready() -> void:
 
 
 func _get_settings_cfg_path() -> String:
-	return ProjectSettings.globalize_path("user://package_manager/settings.cfg")
+	return PackageManagerUtil.get_settings_file_path()
 
 
 func _load_current() -> void:
@@ -58,10 +58,15 @@ func _update_warning() -> void:
 func _on_browse_pressed() -> void:
 	var fd := EditorFileDialog.new()
 	fd.file_mode = EditorFileDialog.FILE_MODE_OPEN_DIR
+	fd.access = EditorFileDialog.ACCESS_FILESYSTEM
 	fd.title = "Select package store folder"
 	fd.dir_selected.connect(_on_dir_selected)
 	add_child(fd)
-	fd.current_dir = ProjectSettings.globalize_path("user://") if _store_path_edit.text.is_empty() else ProjectSettings.globalize_path(_store_path_edit.text)
+	var current := _store_path_edit.text.strip_edges()
+	if current.is_empty():
+		fd.current_dir = PackageManagerUtil.get_default_store_path()
+	else:
+		fd.current_dir = PackageManagerUtil.globalize(current) if current.begins_with("user://") or current.begins_with("res://") else current
 	fd.popup_centered_ratio(0.5)
 
 
@@ -73,17 +78,18 @@ func _on_dir_selected(dir: String) -> void:
 func _on_open_folder_pressed() -> void:
 	var p := _store_path_edit.text.strip_edges()
 	if p.is_empty():
-		p = PackageManagerUtil.DEFAULT_STORE_PATH
-	var abs_path := ProjectSettings.globalize_path(p) if p.begins_with("user://") else p
-	if not DirAccess.dir_exists_absolute(abs_path):
-		abs_path = abs_path.get_base_dir()
-	OS.shell_open(abs_path)
+		p = PackageManagerUtil.get_default_store_path()
+	else:
+		p = PackageManagerUtil.globalize(p) if p.begins_with("user://") or p.begins_with("res://") else p
+	if not DirAccess.dir_exists_absolute(p):
+		p = p.get_base_dir()
+	OS.shell_open(p)
 
 
 func _on_save_pressed() -> void:
 	var path_text := _store_path_edit.text.strip_edges()
 	if path_text.is_empty():
-		path_text = PackageManagerUtil.DEFAULT_STORE_PATH
+		path_text = PackageManagerUtil.get_default_store_path()
 	var err := PackageManagerUtil.set_store_path(path_text)
 	if err != OK:
 		return
