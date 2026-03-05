@@ -25,7 +25,6 @@ const CELL_PATH := 0
 
 func _ready() -> void:
 	get_ok_button().text = "Install"
-	get_cancel_button().text = "Cancel"
 	get_ok_button().pressed.connect(_on_install_pressed)
 	_install_folder_btn.pressed.connect(_on_change_folder_pressed)
 	_ignore_root_check.toggled.connect(_on_ignore_root_toggled)
@@ -45,7 +44,7 @@ func setup(package: Dictionary, store_root: String, package_id: String, overwrit
 	var manifest := PackageManagerUtil.load_manifest(store_root, package_id)
 	_manifest_paths = PackedStringArray(manifest.get("paths", []))
 	_ignore_root_check.button_pressed = false
-	_install_folder_label.text = "res://" + (_install_subpath + "/").replace("//", "/") if not _install_subpath.is_empty() else "res:///"
+	_install_folder_label.text = ("res://" + _install_subpath + "/").replace("//", "/") if not _install_subpath.is_empty() else "res://"
 	_populate_contents_tree()
 	_update_preview()
 	_update_conflict_label()
@@ -74,6 +73,7 @@ func _populate_contents_tree() -> void:
 				var item := _contents_tree.create_item(parent_item)
 				item.set_text(0, seg)
 				item.set_cell_mode(0, TreeItem.CELL_MODE_CHECK)
+				item.set_editable(0, true)
 				item.set_checked(0, true)
 				if i == segments.size() - 1:
 					item.set_metadata(0, p)
@@ -150,10 +150,13 @@ func _update_preview() -> void:
 	_preview_tree.clear()
 	_preview_tree.hide_root = true
 	var root := _preview_tree.create_item()
-	var base := "res://" + _install_subpath.trim_suffix("/")
-	if not _install_subpath.is_empty():
+	var base := "res://" + _install_subpath.trim_suffix("/").replace("\\", "/")
+	if _install_subpath.is_empty():
+		_install_folder_label.text = "res://"
+		base = "res://"
+	else:
 		base = base.trim_suffix("/")
-	_install_folder_label.text = base + "/"
+		_install_folder_label.text = base + "/"
 	var selected := _get_selected_paths()
 	var path_to_item: Dictionary = {}
 	path_to_item[""] = root
@@ -209,10 +212,14 @@ func _on_change_folder_pressed() -> void:
 
 
 func _on_install_dir_selected(dir: String) -> void:
-	if not dir.begins_with(_project_root):
-		return
-	_install_subpath = dir.substr(_project_root.length()).lstrip("/\\").replace("\\", "/")
-	_install_folder_label.text = "res://" + (_install_subpath + "/").replace("//", "/")
+	# EditorFileDialog with ACCESS_RESOURCES returns res:// paths, not absolute
+	if dir.begins_with("res://"):
+		_install_subpath = dir.substr(6).replace("\\", "/").strip_edges().trim_suffix("/")
+	else:
+		if not dir.begins_with(_project_root):
+			return
+		_install_subpath = dir.substr(_project_root.length()).lstrip("/\\").replace("\\", "/")
+	_install_folder_label.text = ("res://" + _install_subpath + "/").replace("//", "/") if not _install_subpath.is_empty() else "res://"
 	_update_preview()
 	_update_conflict_label()
 
@@ -223,5 +230,3 @@ func _on_install_pressed() -> void:
 		return
 	install_requested.emit(_install_subpath, paths, _ignore_asset_root)
 	hide()
-
-

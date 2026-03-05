@@ -7,6 +7,7 @@ var plugin: EditorPlugin
 const PackDialogScene = preload("res://addons/package_manager/pack_dialog.tscn")
 const PreviewPanelScene = preload("res://addons/package_manager/preview_panel.tscn")
 const SettingsDialogScene = preload("res://addons/package_manager/settings_dialog.tscn")
+const InstallConfigDialogScene = preload("res://addons/package_manager/install_config_dialog.tscn")
 
 @onready var _toolbar: HBoxContainer = $MarginContainer/VBox/Toolbar
 @onready var _list_container: VBoxContainer = $MarginContainer/VBox/ListContainer
@@ -31,6 +32,7 @@ var _duplicate_id_dialog: AcceptDialog
 var _duplicate_id_edit: LineEdit
 var _preview_panel: Window
 var _settings_dialog: AcceptDialog
+var _install_config_dialog: AcceptDialog
 
 
 func _ready() -> void:
@@ -50,6 +52,7 @@ func _ready() -> void:
 	_setup_pack_dialog()
 	_setup_confirm_dialogs()
 	_setup_settings_dialog()
+	_setup_install_config_dialog()
 	_set_tooltips()
 	_refresh_packages()
 
@@ -71,7 +74,7 @@ func _on_add_pressed() -> void:
 		if _pack_dialog.has_method("clear_form"):
 			_pack_dialog.clear_form()
 		_pack_dialog.popup_centered_ratio(0.5)
-		show()
+		call_deferred("_keep_manager_visible")
 		_update_status("Create a new package")
 
 
@@ -82,6 +85,7 @@ func _on_refresh_pressed() -> void:
 func _on_settings_pressed() -> void:
 	if _settings_dialog:
 		_settings_dialog.popup_centered_ratio(0.4)
+		call_deferred("_keep_manager_visible")
 		_update_status("Configure store path and options")
 
 
@@ -100,11 +104,33 @@ func _on_install_pressed() -> void:
 	var pkg: Dictionary = _packages[_selected_package_index]
 	var store_root: String = pkg["store_root"]
 	var package_id: String = pkg["id"]
+	var overwrite := _get_overwrite_setting()
+	if _install_config_dialog:
+		_install_config_dialog.setup(pkg, store_root, package_id, overwrite)
+		_install_config_dialog.popup_centered_ratio(0.75)
+		call_deferred("_keep_manager_visible")
+
+
+func _setup_install_config_dialog() -> void:
+	_install_config_dialog = InstallConfigDialogScene.instantiate()
+	_install_config_dialog.visible = false
+	_install_config_dialog.transient = false
+	get_parent().add_child(_install_config_dialog)
+	if _install_config_dialog.has_signal("install_requested"):
+		_install_config_dialog.install_requested.connect(_on_install_config_confirmed)
+
+
+func _on_install_config_confirmed(install_subpath: String, paths: PackedStringArray, ignore_asset_root: bool) -> void:
+	if _selected_package_index < 0:
+		return
+	var pkg: Dictionary = _packages[_selected_package_index]
+	var store_root: String = pkg["store_root"]
+	var package_id: String = pkg["id"]
 	var project_root := ProjectSettings.globalize_path("res://")
 	_install_btn.disabled = true
 	_update_status("Installing...")
 	var overwrite := _get_overwrite_setting()
-	var result := PackageManagerUtil.install_package(store_root, package_id, project_root, overwrite)
+	var result := PackageManagerUtil.install_package_selective(store_root, package_id, project_root, install_subpath, paths, ignore_asset_root, overwrite)
 	_install_btn.disabled = false
 	if result.get("ok", false):
 		_update_status("Installed '%s'." % pkg.get("name", package_id))
@@ -127,6 +153,7 @@ func _on_duplicate_pressed() -> void:
 	_duplicate_id_edit.text = pkg["id"] + "_copy"
 	_duplicate_id_edit.placeholder_text = "new_package_id"
 	_duplicate_id_dialog.popup_centered()
+	call_deferred("_keep_manager_visible")
 	_duplicate_id_edit.grab_focus()
 
 
@@ -156,6 +183,7 @@ func _on_remove_pressed() -> void:
 	var pkg: Dictionary = _packages[_selected_package_index]
 	_confirm_remove_dialog.dialog_text = "Remove package \"%s\"? This cannot be undone." % pkg.get("name", pkg["id"])
 	_confirm_remove_dialog.popup_centered()
+	call_deferred("_keep_manager_visible")
 
 
 func _on_confirmed_remove() -> void:
@@ -177,12 +205,14 @@ func _setup_confirm_dialogs() -> void:
 	_confirm_remove_dialog = ConfirmationDialog.new()
 	_confirm_remove_dialog.title = "Remove Package"
 	_confirm_remove_dialog.visible = false
+	_confirm_remove_dialog.transient = false
 	_confirm_remove_dialog.confirmed.connect(_on_confirmed_remove)
 	parent.add_child(_confirm_remove_dialog)
 
 	_duplicate_id_dialog = AcceptDialog.new()
 	_duplicate_id_dialog.title = "Duplicate Package"
 	_duplicate_id_dialog.visible = false
+	_duplicate_id_dialog.transient = false
 	var v := VBoxContainer.new()
 	var lab := Label.new()
 	lab.text = "New package ID:"
@@ -199,6 +229,7 @@ func _setup_confirm_dialogs() -> void:
 func _setup_settings_dialog() -> void:
 	_settings_dialog = SettingsDialogScene.instantiate()
 	_settings_dialog.visible = false
+	_settings_dialog.transient = false
 	get_parent().add_child(_settings_dialog)
 	if _settings_dialog.has_signal("settings_saved"):
 		_settings_dialog.settings_saved.connect(_on_settings_saved)
@@ -312,11 +343,14 @@ func _open_preview_for_index(index: int) -> void:
 		return
 	if _preview_panel == null:
 		_preview_panel = PreviewPanelScene.instantiate()
-		add_child(_preview_panel)
+		_preview_panel.transient = false
+		get_parent().add_child(_preview_panel)
+		_preview_panel.visible = false
 		_preview_panel.closed.connect(_on_preview_closed)
 	var pkg: Dictionary = _packages[index]
 	_preview_panel.setup(pkg, plugin)
 	_preview_panel.popup_centered(Vector2i(520, 520))
+	call_deferred("_keep_manager_visible")
 
 
 func _on_preview_closed() -> void:
@@ -340,6 +374,10 @@ func _on_create_package_requested(package_id: String, display_name: String, vers
 
 func _on_close_requested() -> void:
 	hide()
+
+
+func _keep_manager_visible() -> void:
+	show()
 
 
 func open_at_screen_with_mouse() -> void:

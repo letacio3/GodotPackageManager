@@ -147,7 +147,14 @@ static func load_manifest(store_root: String, package_id: String) -> Dictionary:
 	if cfg.load(manifest_path) != OK:
 		return {}
 	var paths_var := cfg.get_value("package", "paths", [])
-	var paths: PackedStringArray = PackedStringArray(paths_var) if paths_var is Array else PackedStringArray()
+	var paths: PackedStringArray = PackedStringArray()
+	if paths_var is Array:
+		for p in paths_var:
+			paths.append(str(p))
+	elif paths_var is PackedStringArray:
+		paths = paths_var
+	if paths.is_empty():
+		paths = list_content_paths(globalize(store_root), package_id)
 	return {
 		"id": package_id,
 		"name": cfg.get_value("package", "name", package_id),
@@ -157,6 +164,37 @@ static func load_manifest(store_root: String, package_id: String) -> Dictionary:
 		"media": cfg.get_value("package", "media", []),
 		"paths": paths,
 	}
+
+
+
+## List all relative paths under content/ for a package (for old packages without paths in manifest).
+static func list_content_paths(store_root_globalized: String, package_id: String) -> PackedStringArray:
+	var out: PackedStringArray = []
+	var content_dir := store_root_globalized.path_join(package_id).path_join("content")
+	if not DirAccess.dir_exists_absolute(content_dir):
+		return out
+	_list_content_paths_recursive(content_dir, "", out)
+	return out
+
+
+static func _list_content_paths_recursive(abs_dir: String, rel_prefix: String, out: PackedStringArray) -> void:
+	var dir := DirAccess.open(abs_dir)
+	if dir == null:
+		return
+	dir.list_dir_begin()
+	var n := dir.get_next()
+	while n != "":
+		if n == "." or n == "..":
+			n = dir.get_next()
+			continue
+		var rel := rel_prefix + n if rel_prefix.is_empty() else rel_prefix + "/" + n
+		var full := abs_dir.path_join(n)
+		if dir.current_is_dir():
+			_list_content_paths_recursive(full, rel, out)
+		else:
+			out.append(rel)
+		n = dir.get_next()
+	dir.list_dir_end()
 
 
 ## Install (unpack) a package into the project. store_root is the package's store root path.
@@ -285,7 +323,8 @@ static func remove_media_file(store_root_globalized: String, package_id: String,
 
 ## Set the package thumbnail to a media path (must be in media list or added).
 static func set_package_thumbnail(store_root_globalized: String, package_id: String, rel_path: String) -> Error:
-	var manifest_path := store_root_globalized.path_join(package_id).path_join("manifest.cfg")
+	var root := globalize(store_root_globalized)
+	var manifest_path := root.path_join(package_id).path_join("manifest.cfg")
 	var cfg := ConfigFile.new()
 	if cfg.load(manifest_path) != OK:
 		return FAILED
